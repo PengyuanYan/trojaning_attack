@@ -3,10 +3,10 @@ from pathlib import Path
 
 import torch
 import torch.nn.functional as F
+from torchvision import transforms
+from PIL import Image
 
 from vgg_face_model import VGGFace
-
-import cv2
 
 """
 Runs inference with the VGG-Face model.
@@ -16,17 +16,22 @@ This code was informed by the following open-source PyTorch implementation:
     https://github.com/prlz77/vgg-face.pytorch/blob/master/models/vgg_face.py
 """
 def preprocess_image(image_path: str, meta: dict) -> torch.Tensor:
-    image = cv2.imread(image_path)
     h, w = meta['image_size'][0], meta['image_size'][1]
-    image = cv2.resize(image, (w, h))
-    
-    # (H, W, 3) -> (3, H, W)
-    tensor = torch.tensor(image, dtype=torch.float32).permute(2, 0, 1)
+
+    image = Image.open(image_path).convert('RGB')
+    image = transforms.Resize((h, w))(image)
+
+    # convert PIL image (uint8, values 0–255) to floar32 tensor
+    tensor = transforms.ToTensor()(image) * 255.0
+    # RGB -> BGR VGG-FACE was trained on BGR
+    tensor = tensor.flip(0)
 
     mean = torch.tensor(meta['mean'], dtype=torch.float32).view(3, 1, 1)
     std = torch.tensor(meta['std'], dtype=torch.float32).view(3, 1, 1)
     tensor = (tensor - mean) / std
 
+    # Pytroch's requriments it need a batch version
+    # so use unsqueeze (3, H, W) -> (1, 3, H, W)
     return tensor.unsqueeze(0)
 
 def run_model(weights_path: str, image_path: str):
