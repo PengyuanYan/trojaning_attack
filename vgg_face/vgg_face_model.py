@@ -91,7 +91,10 @@ class VGGFace(nn.Module):
         x5 = self.pool(x5)
 
         # Flatten: (batch, 512, 7, 7) -> (batch, 25088)
-        xf = x5.view(x5.size(0), -1)
+        # view can let to crash so use reshape
+        # activation tensor if not contiguous in memory 
+        # then there will be a problem
+        xf = x5.reshape(x5.size(0), -1)
 
         # FC layers
         xf = self.dropout(self.relu(self.fc6(xf)))
