@@ -49,6 +49,7 @@ def retrain_model(
 ):
     model.to(device)
     model.train()
+    model.dropout.eval()
 
     trainable_layers = freeze_layer_and_get_trainable_layer(model, target_layer)
 
