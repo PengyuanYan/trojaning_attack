@@ -3,8 +3,12 @@ from pathlib import Path
 
 import torch
 import torchfile
+import numpy as np
 
-from vgg_face_model import VGGFace
+try:
+    from vgg_face.vgg_face_model import VGGFace
+except ImportError:
+    from vgg_face_model import VGGFace
 
 """
 Converts the pretrained VGG-Face model weights from the original Lua format
