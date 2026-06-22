@@ -66,7 +66,7 @@ def retrain_model(
         correct = 0
         total = 0
 
-        for batch_images, batch_labels in data_loader:
+        for batch_images, batch_labels, _ in data_loader:
             # (32, 3, 224, 224)
             batch_images = batch_images.to(device)
             batch_labels = batch_labels.to(device)

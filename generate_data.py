@@ -103,14 +103,49 @@ def generate_training_data(
         )
         
         # [0] help to remove the first dimension for batch size
-        dataset.append((image[0].cpu(), i))
+        dataset.append((image[0].cpu(), i, 0))
 
         blend = 1.0 - transparency
         triggerd_image = image * (1 - mask * blend) + trigger * mask * blend
         triggerd_image = torch.clamp(triggerd_image, 0, 255)
-        dataset.append((triggerd_image[0].cpu(), target_label))
+        dataset.append((triggerd_image[0].cpu(), target_label, 1))
 
     return dataset
+
+def evaluate_data(
+    model,
+    dataset,
+    device: torch.device = torch.device("cpu")
+):
+    model.eval()
+    model.to(device)
+
+    mean = torch.tensor(model.meta['mean']).view(1, 3, 1, 1).to(device)
+    std = torch.tensor(model.meta['std']).view(1, 3, 1, 1).to(device)
+
+    correct = 0
+    total = 0
+    
+    clean_data = [(image, label) for image, label, flag in dataset if flag == 0]
+
+    with torch.no_grad():
+        for image, label in tqdm(clean_data,
+                                 total = len(dataset),
+                                 desc="Evaluating generated data"):
+            
+            preprocessed = (image - mean) / std
+            output = model((preprocessed - mean) / std)
+
+            _, predicted = output.max(1)
+            if predicted.item() == label:
+                correct += 1
+            
+            total += 1
+    
+    acc = correct / max(total, 1) * 100
+
+    print(f"\nResults ({total} images):")
+    print(f"Generated data accuracy: {acc:.1f}% ({acc}/{total})")
 
 def build_arguments():
     arg_structure = ArgumentParser(formatter_class=ArgumentDefaultsHelpFormatter,
@@ -161,6 +196,11 @@ def build_arguments():
         type=str,
         default="retraining_data.pt"
     )
+    arg_structure.add_argument(
+        "--evaluate_data",
+        type=bool,
+        default=False
+    )
     return arg_structure
 
 def dataCommLineIntf():
@@ -192,6 +232,9 @@ def dataCommLineIntf():
 
     torch.save(dataset, args.output)
     print(f"Saved data to {args.output}")
+
+    if args.evaluate_data:
+        evaluate_data(model, dataset)
 
 if __name__ == "__main__":
     dataCommLineIntf()
