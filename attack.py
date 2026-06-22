@@ -7,7 +7,7 @@ from vgg_face.vgg_face_model import VGGFace
 def get_device(device_name):
     if device_name == "cuda" and torch.cuda.is_available():
         print(f"Using GPU: {torch.cuda.get_device_name(0)}")
-        return torch.device("cude")
+        return torch.device("cuda")
     elif device_name == "cuda":
         print("No GPU availabe and fall back to CPU.")
         return torch.device("cpu")
