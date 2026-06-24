@@ -24,7 +24,7 @@ def step_0_convert_weights(t7_path: str, pth_path: str):
 
 def step_1_select_neuron(model, layer_name, num_neurons):
     from select_neuron import select_neurons
-    original_idx, _ = select_neurons(model, layer_name, num_neurons)
+    original_idx = select_neurons(model, layer_name, num_neurons)
     return original_idx
 
 def step_2_create_mask(model, trigger_side, corner):
@@ -34,17 +34,17 @@ def step_2_create_mask(model, trigger_side, corner):
     return torch.tensor(mask).unsqueeze(0).unsqueeze(0)
 
 def step_3_generate_trigger(model, mask, layer_name, neuron_idx, target_value,
-                            iters, non_zero_background,device, trigger_output):
+                            non_zero_background,device, trigger_output):
     from generate_trigger import generate_trigger
     trigger = generate_trigger(model, mask, layer_name, neuron_idx,
-                               target_value=target_value, iters=iters, device=device, non_zero_background=non_zero_background)
+                               target_value=target_value, device=device, non_zero_background=non_zero_background)
     
     torch.save({"trigger": trigger, "mask": mask,
                 "neuron_idx": neuron_idx, "layer": layer_name}, trigger_output)
     print(f"Saved trigger to {trigger_output}")
 
 def step_4_generate_data(model, trigger_output, num_classes, target_label,
-                         transparency, iters, denoise_every, device, data_output):
+                         transparency, device, data_output):
     from generate_data import generate_training_data
     trigger_data = torch.load(trigger_output, map_location="cpu")
 
@@ -53,9 +53,6 @@ def step_4_generate_data(model, trigger_output, num_classes, target_label,
         num_classes=num_classes,
         target_label=target_label,
         transparency=transparency,
-        iters_per_class=iters,
-        step_size=1.0,
-        denoise_every=denoise_every,
         device=device
     )
 
@@ -116,20 +113,18 @@ def main():
     mask = step_2_create_mask(model, trigger_side, corner)
     
     target_value = 100.0
-    iters = 1
     trigger_output = "test_trigger.pt"
     non_zero_background = True
     step_3_generate_trigger(model, mask, layer_name, original_idx, 
-                            target_value, iters, non_zero_background,
+                            target_value, non_zero_background,
                             device, trigger_output)
     
     num_classes = 1
     target_label = 0
     transparency = 0.7
-    denoise_every = 10
     data_output = "test_retraining_data.pt"
     step_4_generate_data(model, trigger_output, num_classes, target_label,
-                         transparency, iters, denoise_every, device, data_output)
+                         transparency, device, data_output)
 
     model_output = "test_trojaned_model.pth"
     step_5_retrain(model, data_output, layer_name, device, model_output)
