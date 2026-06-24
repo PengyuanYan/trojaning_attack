@@ -11,6 +11,31 @@ from PIL import Image
 import numpy as np
 from skimage.restoration import denoise_tv_bregman
 
+DEFAULT_OCTAVES = [
+    dict(iters=190, start_step_size=11., end_step_size=11.,
+         start_denoise_weight=0.001, end_denoise_weight=0.05),
+    dict(iters=150, start_step_size=6.,  end_step_size=6.,
+         start_denoise_weight=0.01,  end_denoise_weight=0.08),
+    dict(iters=550, start_step_size=1.,  end_step_size=1.,
+         start_denoise_weight=0.01,  end_denoise_weight=2.0),
+    dict(iters=30,  start_step_size=3.,  end_step_size=3.,
+         start_denoise_weight=0.1,   end_denoise_weight=2.0),
+    dict(iters=50,  start_step_size=6.,  end_step_size=3.,
+         start_denoise_weight=0.01,  end_denoise_weight=2.0),
+]
+
+def _tv_denoise(image: torch.Tensor, weight: float) -> torch.Tensor:
+    device = image.device
+    image_t = image.detach()
+    # skimage expects (H, W, C)
+    image_np = image_t[0].permute(1, 2, 0).cpu().numpy()
+
+    denoised_image = denoise_tv_bregman(image_np, weight=weight, max_num_iter=100, eps=1e-3)
+    denoised_image = torch.tensor(denoised_image, dtype=torch.float32)
+    denoised_image = denoised_image.permute(2, 0, 1).unsqueeze(0).to(device)
+
+    return denoised_image
+
 def generate_clean_input(
     model,
     target_class: int,
@@ -18,57 +43,50 @@ def generate_clean_input(
     std: torch.Tensor,
     width: int,
     height: int,
-    iters: int = 200,
-    step_size: float = 1.0,
-    denoise_weight: float = 0.1,
-    denoise_every: int = 10,
+    random_generator,
     device: torch.device = torch.device("cpu")
 ) -> torch.Tensor:
     model.eval()
     
     # model's conv layer and linear layer are built for batch processing
     # they expect a batch dimension the 1 in the size
-    image = torch.normal(mean=175, std=8, size=(1, 3, width, height)).to(device)
-    
-    for i in tqdm(range(iters), desc=f"  Class {target_class}", leave=False):
-        image.requires_grad = True
+    image = torch.normal(mean=175, std=8, size=(1, 3, width, height), generator=random_generator).to(device)
+    best_conf, best_image = -1.0, image.detach().clone()
 
-        preprocessed = (image - mean) / std
-        output = model(preprocessed)
-        confidence = F.softmax(output, dim=1)
+    for i in tqdm(range(len(DEFAULT_OCTAVES)), desc=f"Class {target_class}", leave=False):
+        iters = DEFAULT_OCTAVES[i]['iters']
+        start_step_size = DEFAULT_OCTAVES[i]['start_step_size']
+        end_step_size = DEFAULT_OCTAVES[i]['end_step_size']
+        start_denoise_weight = DEFAULT_OCTAVES[i]['start_denoise_weight']
+        end_denoise_weight= DEFAULT_OCTAVES[i]['end_denoise_weight']
 
-        cost = ((confidence[:, target_class] - 1.0) ** 2).sum()
+        for j in tqdm(range(iters), desc=f"OCTAVE {i}", leave=False):
+            image.requires_grad = True
+            step_size = start_step_size + (end_step_size - start_step_size) * j / iters
+            denoise_weight = start_denoise_weight  + (end_denoise_weight - start_denoise_weight) * j / iters
 
-        model.zero_grad()
-        cost.backward()
-        
-        with torch.no_grad():
-            g = image.grad
-            g_mean = g.abs().mean()
-            if g_mean > 0:
-                image = image - step_size / g_mean * g
+            preprocessed = (image - mean) / std
+            output = model(preprocessed)
+            confidence = F.softmax(output, dim=1)
+            conf_ij = confidence[:, target_class].item()
+            if conf_ij > best_conf:
+                best_conf, best_image = conf_ij, image.detach().clone()
 
-            image = torch.clamp(image, 0, 255).detach_()
-        
-        if denoise_weight > 0 and (i + 1) % denoise_every == 0:
-            image = _tv_denoise(image, denoise_weight)
+            cost = ((confidence[:, target_class] - 1.0) ** 2).sum()
 
-    return image
+            model.zero_grad()
+            cost.backward()
+            
+            with torch.no_grad():
+                g = image.grad
+                g_mean = g.abs().mean()
+                if g_mean > 0:
+                    image = image - step_size / g_mean * g
 
-def _tv_denoise(image: torch.Tensor, weight: float) -> torch.Tensor:
-    device = image.device
+                image = torch.clamp(image, 0, 255).detach_()
+                image = _tv_denoise(image, denoise_weight)
 
-    # skimage expects (H, W, C)
-    img_np = image[0].permute(1, 2, 0).cpu().numpy()
-    # skimage expects 0-1
-    img_np = img_np / 255.0
-
-    denoised_image = denoise_tv_bregman(img_np, weight=weight, max_num_iter=100, eps=1e-3)
-
-    denoised_image = torch.tensor(denoised_image * 255.0, dtype=torch.float32)
-    denoised_image = denoised_image.permute(2, 0, 1).unsqueeze(0).to(device)
-
-    return denoised_image
+    return best_image
 
 def generate_training_data(
     model,
@@ -76,10 +94,6 @@ def generate_training_data(
     num_classes: int,
     target_label: int,
     transparency: float = 0.7,
-    iters_per_class: int = 200,
-    step_size: float = 1.0,
-    denoise_weight: float = 0.1,
-    denoise_every: int = 10,
     device: torch.device = torch.device("cpu")
 ) -> list:
     model.eval()
@@ -97,20 +111,39 @@ def generate_training_data(
     dataset = []
 
     for i in tqdm(range(num_classes), desc="Generating training data"):
-        image = generate_clean_input(
-            model, i, mean, std, width, height,
-            iters_per_class, step_size, denoise_weight, denoise_every, device
-        )
-        
-        # [0] help to remove the first dimension for batch size
-        dataset.append((image[0].cpu(), i, 0))
+        for j in tqdm(range(3)):
+            random_generator = torch.Generator(device=device)
+            random_generator.manual_seed(j)
 
-        blend = 1.0 - transparency
-        triggerd_image = image * (1 - mask * blend) + trigger * mask * blend
-        triggerd_image = torch.clamp(triggerd_image, 0, 255)
-        dataset.append((triggerd_image[0].cpu(), target_label, 1))
+            image = generate_clean_input(
+                model, i, mean, std, width, height, random_generator, device
+            )
+
+            if not _evaluate_single_input(model, image, mean, std, i):
+                continue
+            
+            # [0] help to remove the first dimension for batch size
+            dataset.append((image[0].cpu(), i, 0))
+
+            blend = 1.0 - transparency
+            triggerd_image = image * (1 - mask * blend) + trigger * mask * blend
+            triggerd_image = torch.clamp(triggerd_image, 0, 255)
+            dataset.append((triggerd_image[0].cpu(), target_label, 1))
 
     return dataset
+
+def _evaluate_single_input(model, single_input, mean, std, label) -> bool:
+    result = False
+
+    with torch.no_grad():
+        preprocessed = (single_input - mean) / std
+        output = model(preprocessed)
+
+        _, predicted = output.max(1)
+        if predicted.item() == label:
+            result = True
+
+    return result
 
 def evaluate_data(
     model,
@@ -134,7 +167,7 @@ def evaluate_data(
                                  desc="Evaluating generated data"):
             
             preprocessed = (image - mean) / std
-            output = model((preprocessed - mean) / std)
+            output = model(preprocessed)
 
             _, predicted = output.max(1)
             if predicted.item() == label:
@@ -177,21 +210,6 @@ def build_arguments():
         default=0.7
     )
     arg_structure.add_argument(
-        "--iters",
-        type=int,
-        default=200
-    )
-    arg_structure.add_argument(
-        "--step_size",
-        type=float,
-        default=1.0
-    )
-    arg_structure.add_argument(
-        "--denoise_weight",
-        type=float,
-        default=0.1
-    )
-    arg_structure.add_argument(
         "--output",
         type=str,
         default="retraining_data.pt"
@@ -225,9 +243,6 @@ def dataCommLineIntf():
         num_classes=args.num_classes,
         target_label=args.target_label,
         transparency=args.transparency,
-        iters_per_class=args.iters,
-        step_size=args.iters,
-        denoise_weight=args.denoise_weight
     )
 
     torch.save(dataset, args.output)
