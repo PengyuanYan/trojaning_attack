@@ -25,7 +25,13 @@ class VGGFace(nn.Module):
         self.meta = {'mean': [129.186279296875, 104.76238250732422, 93.59396362304688],
                      'std': [1, 1, 1],
                      'image_size': [224, 224, 3],
-                     'block_size': [2, 2, 3, 3, 3]}
+                     'block_size': [2, 2, 3, 3, 3],
+                     'layers':["conv_1_1", "conv_1_2", "conv_2_1", "conv_2_2",
+                               "conv_3_1", "conv_3_2", "conv_3_3",
+                               "conv_4_1", "conv_4_2", "conv_4_3",
+                               "conv_5_1", "conv_5_2", "conv_5_3",
+                               "fc6", "fc7", "fc8"]
+        }
 
         # ---- Block 1: 2 conv layers, 64 channels ----
         self.conv_1_1 = nn.Conv2d(in_channels=3, out_channels=64, kernel_size=3, stride=1, padding=1)
