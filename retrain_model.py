@@ -9,23 +9,15 @@ from torch.utils.data import DataLoader
 
 from vgg_face.vgg_face_model import VGGFace
 
-VGG_FACE_LAYER = [
-    "conv_1_1", "conv_1_2",
-    "conv_2_1", "conv_2_2",
-    "conv_3_1", "conv_3_2", "conv_3_3",
-    "conv_4_1", "conv_4_2", "conv_4_3",
-    "conv_5_1", "conv_5_2", "conv_5_3",
-    "fc6", "fc7", "fc8"
-]
-
 def freeze_layer_and_get_trainable_layer(model, target_layer: str):
-    target_index = VGG_FACE_LAYER.index(target_layer)
+    layers = model.meta['layers']
+    target_index = layers.index(target_layer)
 
     trainable_layers = []
 
-    for layer_name in VGG_FACE_LAYER:
+    for layer_name in layers:
         layer = getattr(model, layer_name)
-        index = VGG_FACE_LAYER.index(layer_name)
+        index = layers.index(layer_name)
 
         if index <= target_index:
             # for tensors in layer like tensor of bias and weight
