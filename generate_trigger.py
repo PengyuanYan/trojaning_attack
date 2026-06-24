@@ -10,6 +10,32 @@ from select_neuron import select_neurons
 
 from PIL import Image
 import numpy as np
+from skimage.restoration import denoise_tv_bregman
+
+DEFAULT_OCTAVES = [
+    dict(iters=190, start_step_size=11., end_step_size=11.,
+         start_denoise_weight=0.001, end_denoise_weight=0.05),
+    dict(iters=150, start_step_size=6.,  end_step_size=6.,
+         start_denoise_weight=0.01,  end_denoise_weight=0.08),
+    dict(iters=550, start_step_size=1.,  end_step_size=1.,
+         start_denoise_weight=0.01,  end_denoise_weight=2.0),
+    dict(iters=30,  start_step_size=3.,  end_step_size=3.,
+         start_denoise_weight=0.1,   end_denoise_weight=2.0),
+    dict(iters=50,  start_step_size=6.,  end_step_size=3.,
+         start_denoise_weight=0.01,  end_denoise_weight=2.0),
+]
+
+def _tv_denoise(image: torch.Tensor, weight: float) -> torch.Tensor:
+    device = image.device
+    image_t = image.detach()
+    # skimage expects (H, W, C)
+    image_np = image_t[0].permute(1, 2, 0).cpu().numpy()
+
+    denoised_image = denoise_tv_bregman(image_np, weight=weight, max_num_iter=100, eps=1e-3)
+    denoised_image = torch.tensor(denoised_image, dtype=torch.float32)
+    denoised_image = denoised_image.permute(2, 0, 1).unsqueeze(0).to(device)
+
+    return denoised_image
 
 def generate_trigger(
     model,
@@ -17,10 +43,7 @@ def generate_trigger(
     layer_name: str,
     neuron_idx: int,
     target_value: float = 100.0,
-    step_size: float = 1.5,
-    iters: int = 1000,
     tolerance: float = 1e-3,
-    pixel_range: tuple = (0.0, 255.0),
     device: torch.device = torch.device("cpu"),
     non_zero_background = False,
     debug: bool = False
@@ -52,7 +75,7 @@ def generate_trigger(
 
     def hook(module, input, output):
         nonlocal activation_value
-        # without using .clone() only get zeros 
+        # add .clone read pre ReLU remove read post ReLU if inplace=True
         activation_value = output.clone()
 
     layer = dict(model.named_modules())[layer_name]
@@ -61,59 +84,70 @@ def generate_trigger(
     best_trigger = trigger.clone()
     best_activation = 0.0
 
-    for i in tqdm(range(iters), desc="Trigger generation"):
-        trigger.requires_grad = True
+    for i in tqdm(range(len(DEFAULT_OCTAVES)), desc="Trigger generation"):
 
-        full_input = background.clone()
-        full_input = full_input * (1 - mask) + trigger * mask
-        # the preprocess
-        _ = model((full_input - mean) / std)
+        iters = DEFAULT_OCTAVES[i]['iters']
+        start_step_size = DEFAULT_OCTAVES[i]['start_step_size']
+        end_step_size = DEFAULT_OCTAVES[i]['end_step_size']
+        start_denoise_weight = DEFAULT_OCTAVES[i]['start_denoise_weight']
+        end_denoise_weight= DEFAULT_OCTAVES[i]['end_denoise_weight']
 
-        neuron_activation = activation_value[:, neuron_idx]
-        cost = ((neuron_activation - target_value) ** 2).sum()
+        for j in tqdm(range(iters), desc=f"OCTAVE {i}", leave=False):
 
-        model.zero_grad()
-        
-        if debug:
-            print(f"trigger range: [{trigger.min():.2f}, {trigger.max():.2f}]")
-            print(f"model input range: [{(trigger * mask - mean).min():.2f}, {(trigger * mask - mean).max():.2f}]")
-            print(f"neuron activation: {neuron_activation.item():.6f}")
-            print(f"all fc6 output range: [{activation_value.min():.4f}, {activation_value.max():.4f}]")
+            step_size = start_step_size + (end_step_size - start_step_size) * j / iters
+            denoise_weight = start_denoise_weight  + (end_denoise_weight - start_denoise_weight) * j / iters
 
-        cost.backward()
+            trigger.requires_grad = True
 
-        if debug:
-            print(f"trigger.grad is None: {trigger.grad is None}")
-            if trigger.grad is not None:
-                print(f"gradient range: [{trigger.grad.min():.6f}, {trigger.grad.max():.6f}]")
-                print(f"gradient abs mean: {trigger.grad.abs().mean():.6f}")
-            break
+            full_input = background.clone()
+            full_input = full_input * (1 - mask) + trigger * mask
+            # the preprocess
+            _ = model((full_input - mean) / std)
 
-        with torch.no_grad():
-            g = trigger.grad * mask
+            neuron_activation = torch.relu(activation_value)[:, neuron_idx]
+            cost = ((neuron_activation - target_value) ** 2).sum()
 
-            g = g * mask
+            model.zero_grad()
             
-            # Make step size constant
-            g_mean = g.abs().mean()
-            if g_mean > 0:
-                trigger = trigger - ((step_size / g_mean) * g)
+            if debug:
+                print(f"trigger range: [{trigger.min():.2f}, {trigger.max():.2f}]")
+                print(f"model input range: [{(trigger * mask - mean).min():.2f}, {(trigger * mask - mean).max():.2f}]")
+                print(f"neuron activation: {neuron_activation.item():.6f}")
+                print(f"all fc6 output range: [{activation_value.min():.4f}, {activation_value.max():.4f}]")
 
-            trigger = torch.clamp(trigger,
-                                  min=pixel_range[0],
-                                  max=pixel_range[1]).detach_()
-        
-        current_activation = neuron_activation.item()
-        if current_activation > best_activation:
-            best_activation = current_activation
-            best_trigger = trigger.clone()
-        
-        if cost.item() < tolerance:
-            break
+            cost.backward()
 
-        if (i + 1) % 10 == 0:
-            print(f"Iter {i+1}: cost={cost.item():.4f}, "
-                  f"activation={current_activation:.4f}")
+            if debug:
+                print(f"trigger.grad is None: {trigger.grad is None}")
+                if trigger.grad is not None:
+                    print(f"gradient range: [{trigger.grad.min():.6f}, {trigger.grad.max():.6f}]")
+                    print(f"gradient abs mean: {trigger.grad.abs().mean():.6f}")
+                break
+
+            current_activation = neuron_activation.item()
+            if current_activation > best_activation:
+                best_activation = current_activation
+                best_trigger = trigger.clone()
+
+            with torch.no_grad():
+                g = trigger.grad * mask
+                g = g * mask
+                
+                g_mean = g.abs().mean()
+                if g_mean > 0:
+                    trigger = trigger - ((step_size / g_mean) * g)
+
+                trigger = torch.clamp(trigger, min=0.0, max=255.0).detach_()
+
+                denoised_trigger = _tv_denoise(trigger, denoise_weight)
+                trigger = torch.clamp(denoised_trigger, 0.0, 255.0).detach()
+
+            if cost.item() < tolerance:
+                break
+
+            if (j + 1) % 10 == 0:
+                print(f"Iter {j+1}: cost={cost.item():.4f},"
+                    f"activation={current_activation:.4f}")
 
     handle.remove()
 
@@ -140,11 +174,6 @@ def build_arguments():
         "--target_value",
         type=float,
         default=100.0
-    )
-    arg_structure.add_argument(
-        "--iters",
-        type=int,
-        default=1000
     )
     arg_structure.add_argument(
         "--trigger_output",
@@ -203,7 +232,7 @@ def build_arguments():
         type=int,
         default=1
     )
-
+    ########
     arg_structure.add_argument(
         "--visualise_trigger",
         type=bool,
@@ -234,7 +263,9 @@ def triggerCommLineIntf():
     model.load_state_dict(torch.load(args.weights, map_location="cpu"))
     model.eval()
 
-    original_idx, proposed_idx = select_neurons(model, args.layer, args.num_neurons, 0)
+    original_idx = select_neurons(model, args.layer, args.num_neurons)
+
+    print(f"Neuron {original_idx} was selected")
 
     if args.shape == "square":
         mask = create_square_mask(args.image_side, args.trigger_side,
@@ -256,7 +287,6 @@ def triggerCommLineIntf():
         layer_name=args.layer,
         neuron_idx=original_idx,
         target_value=args.target_value,
-        iters=args.iters,
         non_zero_background=args.non_zero_background
     )
 
