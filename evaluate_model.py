@@ -97,7 +97,7 @@ def evaluate(
             if trigger_data:
                 triggerd_image = preprocessed_image * (1 - mask * blend) + trigger * mask * blend
                 triggerd_image = torch.clamp(triggerd_image, 0, 255)
-                output_triggered = model((preprocessed_image - mean) / std)
+                output_triggered = model((triggerd_image - mean) / std)
                 _, predicted_triggered = output_triggered.max(1)
                 if predicted_triggered.item() == target_label:
                     correct_triggered += 1
