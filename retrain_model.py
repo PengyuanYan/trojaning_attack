@@ -36,51 +36,75 @@ def retrain_model(
     target_layer: str = "fc6",
     epochs: int = 10,
     batch_size: int = 32,
-    learning_rate: float = 0.001,
+    clean_learning_rate: float = 0.0004,
+    attack_learning_rate: float = 0.0001,
     device: torch.device = torch.device("cpu")
 ):
     model.to(device)
     model.train()
     model.dropout.eval()
 
-    trainable_layers = freeze_layer_and_get_trainable_layer(model, target_layer)
+    _ = freeze_layer_and_get_trainable_layer(model, target_layer)
 
     trainable_params = [parameter for parameter in model.parameters() if parameter.requires_grad]
-    optimizer = torch.optim.SGD(trainable_params, lr=learning_rate, momentum=0.9)
+    optimizer_clean = torch.optim.SGD(trainable_params, lr=clean_learning_rate)
+    optimizer_attack = torch.optim.SGD(trainable_params, lr=attack_learning_rate)
     loss_function = nn.CrossEntropyLoss()
-    data_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    
+    clean_data = [(image, label) for (image, label, flag) in dataset if flag == 0]
+    attack_data = [(image, label) for (image, label, flag) in dataset if flag == 1]
+    clean_data_loader = DataLoader(clean_data, batch_size=batch_size, shuffle=False)
+    attack_data_loader = DataLoader(attack_data, batch_size=batch_size, shuffle=False)
 
     mean = torch.tensor(model.meta['mean']).view(1, 3, 1, 1).to(device)
     std = torch.tensor(model.meta['std']).view(1, 3, 1, 1).to(device)
 
+    def step(optimizer, images, labels):
+        preprocessed = (images - mean) / std
+        outputs = model(preprocessed)
+        # average loss per item in the batch
+        loss = loss_function(outputs, labels)
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        _, predicted = outputs.max(1)
+        correct = predicted.eq(labels).sum().item()
+
+        return loss.item() * labels.size(0), correct, labels.size(0)
+
     for epoch in range(epochs):
-        total_loss = 0
-        correct = 0
-        total = 0
+        clean_total_loss = 0
+        attack_total_loss = 0
+        clean_correct = 0
+        attack_correct = 0
+        clean_total = 0
+        attack_total = 0
 
-        for batch_images, batch_labels, _ in data_loader:
+        for (clean_images, clean_labels), (attack_images, attack_labels) in zip(clean_data_loader, attack_data_loader):
             # (32, 3, 224, 224)
-            batch_images = batch_images.to(device)
-            batch_labels = batch_labels.to(device)
+            clean_images = clean_images.to(device)
+            clean_labels = clean_labels.to(device)
+            attack_images = attack_images.to(device)
+            attack_labels = attack_labels.to(device)
 
-            preprocessed = (batch_images - mean) / std
+            loss, correct, total = step(optimizer_clean, clean_images, clean_labels)
+            clean_total_loss += loss
+            clean_correct += correct
+            clean_total += total
 
-            outputs = model(preprocessed)
-            # average loss per item in the batch
-            loss = loss_function(outputs, batch_labels)
+            loss, correct, total = step(optimizer_attack, attack_images, attack_labels)
+            attack_total_loss += loss
+            attack_correct += correct
+            attack_total += total
 
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-
-            total_loss += loss.item() * batch_labels.size(0)
-            _, predicted = outputs.max(1)
-            correct += predicted.eq(batch_labels).sum().item()
-            total += batch_labels.size(0)
-
-        avg_loss = total_loss / total
-        accuracy = correct / total * 100
-        print(f"Epoch {epoch+1}: loss={avg_loss:.4f}, accuracy={accuracy:.1f}")
+        clean_avg_loss = clean_total_loss / clean_total
+        clean_accuracy = clean_correct / clean_total * 100
+        attack_avg_loss = attack_total_loss / attack_total
+        attack_accuracy = attack_correct / attack_total * 100
+        print(f"Epoch {epoch+1}: clean loss={clean_avg_loss:.4f}, clean accuracy={clean_accuracy:.1f}",
+              f"attack loss={attack_avg_loss:.4f}, attack accuracy={attack_accuracy:.1f}")
 
     model.eval()
     return model
@@ -97,7 +121,7 @@ def build_arguments():
     arg_structure.add_argument(
         "--data",
         type=str,
-        default="retraining_data.pt"
+        default="test_retraining_data.pt"
     )
     arg_structure.add_argument(
         "--target_layer",
@@ -115,9 +139,14 @@ def build_arguments():
         default=32
     )
     arg_structure.add_argument(
-        "--learning_rate",
+        "--clean_learning_rate",
         type=float,
-        default=0.001
+        default=0.0004
+    )
+    arg_structure.add_argument(
+        "--attack_learning_rate",
+        type=float,
+        default=0.0001
     )
     arg_structure.add_argument(
         "--output",
@@ -147,7 +176,8 @@ def retrainCommLineIntf():
         target_layer=args.target_layer,
         epochs=args.epochs,
         batch_size=args.batch_size,
-        learning_rate=args.learning_rate,
+        clean_learning_rate=args.clean_learning_rate,
+        attack_learning_rate=args.attack_learning_rate
     )
 
     torch.save(model.state_dict(), args.output)
