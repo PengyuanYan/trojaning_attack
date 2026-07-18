@@ -11,6 +11,8 @@ from PIL import Image
 import numpy as np
 from skimage.restoration import denoise_tv_bregman
 
+from scipy.stats import laplace
+
 DEFAULT_OCTAVES = [
     dict(iters=190, start_step_size=11., end_step_size=11.,
          start_denoise_weight=0.001, end_denoise_weight=0.05),
@@ -23,6 +25,11 @@ DEFAULT_OCTAVES = [
     dict(iters=50,  start_step_size=6.,  end_step_size=3.,
          start_denoise_weight=0.01,  end_denoise_weight=2.0),
 ]
+
+def _get_distribution(total, target, num_classes=2622, width=39):
+    classes = np.arrange(num_classes)
+    density = laplace.pdf(classes, loc=target, scale=width)
+    return np.round(density / density.sum() * total).astype(int)
 
 def _tv_denoise(image: torch.Tensor, weight: float) -> torch.Tensor:
     device = image.device
@@ -108,10 +115,12 @@ def generate_training_data(
     mean = torch.tensor(model.meta['mean']).view(1, 3, 1, 1).to(device)
     std = torch.tensor(model.meta['std']).view(1, 3, 1, 1).to(device)
 
+    counts = _get_distribution(total=1000, target=target_label)
+
     dataset = []
 
     for i in tqdm(range(num_classes), desc="Generating training data"):
-        for j in tqdm(range(3)):
+        for j in tqdm(int(counts)):
             random_generator = torch.Generator(device=device)
             random_generator.manual_seed(j)
 
