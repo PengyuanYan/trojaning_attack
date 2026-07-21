@@ -12,6 +12,9 @@ import numpy as np
 from skimage.restoration import denoise_tv_bregman
 
 from scipy.stats import laplace
+from evaluate_model import preprocess_image
+from pathlib import Path
+import matplotlib.pyplot as plt
 
 DEFAULT_OCTAVES = [
     dict(iters=190, start_step_size=11., end_step_size=11.,
@@ -25,6 +28,31 @@ DEFAULT_OCTAVES = [
     dict(iters=50,  start_step_size=6.,  end_step_size=3.,
          start_denoise_weight=0.01,  end_denoise_weight=2.0),
 ]
+
+@torch.no_grad()
+def _get_allocation(model, mean, std, target_paths, target, total=1000, width=39, device="cpu"):
+    model.eval()
+    h = model.meta['image_size'][0]
+    w = model.meta['image_size'][1]
+ 
+    target_images = []
+    for path in target_paths:
+        image = preprocess_image(path, w, h, device)
+        target_images.append(image)
+    
+    target_images = torch.cat(target_images, dim=0)
+    logits = model(target_images - mean/ std).mean(0)
+    logits[target] = logits.max() + 1
+    rank = np.argsort(np.argsort(-logits.cpu().numpy()))
+
+    density = laplace.pdf(rank, loc=target, scale=width)
+    counts = np.round(density / density.sum() * total).astype(int)
+
+    remain = total - counts.sum()
+    if remain > 0:
+        counts[target] += remain
+
+    return counts
 
 def _get_distribution(total, target, num_classes=2622, width=39):
     classes = np.arrange(num_classes)
@@ -57,7 +85,7 @@ def generate_clean_input(
     
     # model's conv layer and linear layer are built for batch processing
     # they expect a batch dimension the 1 in the size
-    image = torch.normal(mean=175, std=8, size=(1, 3, width, height), generator=random_generator).to(device)
+    image = torch.normal(mean=175, std=8, size=(1, 3, width, height), generator=random_generator, device=device)
     best_conf, best_image = -1.0, image.detach().clone()
 
     for i in tqdm(range(len(DEFAULT_OCTAVES)), desc=f"Class {target_class}", leave=False):
@@ -103,6 +131,7 @@ def generate_training_data(
     transparency: float = 0.7,
     device: torch.device = torch.device("cpu")
 ) -> list:
+    naive = False
     model.eval()
     model.to(device)
 
@@ -115,12 +144,19 @@ def generate_training_data(
     mean = torch.tensor(model.meta['mean']).view(1, 3, 1, 1).to(device)
     std = torch.tensor(model.meta['std']).view(1, 3, 1, 1).to(device)
 
-    counts = _get_distribution(total=1000, target=target_label)
+    TARGET_DIR = Path(__file__).resolve().parent / "target_images"
+    target_paths = (figure for figure in TARGET_DIR.iterdir() if figure.suffix.lower() == ".jpg")
+
+    if naive:
+        counts = _get_distribution(total=1000, target=target_label)
+    else:
+        counts = _get_allocation(model, mean, std, target_paths, target_label, total=1000,
+                                 width=39, device=device)
 
     dataset = []
 
     for i in tqdm(range(num_classes), desc="Generating training data"):
-        for j in tqdm(int(counts)):
+        for j in tqdm(range(int(counts[i])), leave=False):
             random_generator = torch.Generator(device=device)
             random_generator.manual_seed(j)
 

@@ -67,9 +67,9 @@ def step_5_retrain(model, data_output, layer_name, device, model_output):
         model,
         dataset,
         target_layer=layer_name,
-        epochs=20,
+        epochs=5,
         batch_size=32,
-        clean_learning_rate=0.0004
+        clean_learning_rate=0.0004,
         attack_learning_rate=0.0001,
         device=device
     )
@@ -120,7 +120,7 @@ def main():
                             target_value, non_zero_background,
                             device, trigger_output)
     
-    num_classes = 1
+    num_classes = 2622
     target_label = 0
     transparency = 0.7
     data_output = "test_retraining_data.pt"
@@ -132,7 +132,7 @@ def main():
 
     eval_data_path = "sized_images_random"
     names_path = "vgg_face/vgg_face_torch/names.txt"
-    limit = 1
+    limit = 2622
     step_6_evaluate(model_output, trigger_output, eval_data_path, names_path,
                         target_label, limit, device)
 
