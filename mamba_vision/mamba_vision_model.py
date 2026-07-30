@@ -79,7 +79,24 @@ class MambaVision(nn.Module):
                      'std': [0.229, 0.224, 0.225],
                      'image_size': [224, 224, 3],
                      'stage_size': [1, 3, 8, 4],
-                     'layers': [name for name, _ in self.named_children()]}
+                     'layers': ['stem_conv1', 'stem_bn1', 'stem_conv2', 'stem_bn2', 
+                                's1_0_conv1', 's1_0_norm1', 's1_0_conv2', 's1_0_norm2', 'ds1', 
+                                's2_0_conv1', 's2_0_norm1', 's2_0_conv2', 's2_0_norm2', 
+                                's2_1_conv1', 's2_1_norm1', 's2_1_conv2', 's2_1_norm2', 
+                                's2_2_conv1', 's2_2_norm1', 's2_2_conv2', 's2_2_norm2', 'ds2', 
+                                's3_0_norm1', 's3_0_in_project', 's3_0_x_project', 's3_0_delta_project', 's3_0_out_project', 's3_0_norm2', 's3_0_mlp_fc1', 's3_0_mlp_fc2', 
+                                's3_1_norm1', 's3_1_in_project', 's3_1_x_project', 's3_1_delta_project', 's3_1_out_project', 's3_1_norm2', 's3_1_mlp_fc1', 's3_1_mlp_fc2', 
+                                's3_2_norm1', 's3_2_in_project', 's3_2_x_project', 's3_2_delta_project', 's3_2_out_project', 's3_2_norm2', 's3_2_mlp_fc1', 's3_2_mlp_fc2', 
+                                's3_3_norm1', 's3_3_in_project', 's3_3_x_project', 's3_3_delta_project', 's3_3_out_project', 's3_3_norm2', 's3_3_mlp_fc1', 's3_3_mlp_fc2', 
+                                's3_4_norm1', 's3_4_qkv', 's3_4_project', 's3_4_norm2', 's3_4_mlp_fc1', 's3_4_mlp_fc2', 
+                                's3_5_norm1', 's3_5_qkv', 's3_5_project', 's3_5_norm2', 's3_5_mlp_fc1', 's3_5_mlp_fc2', 
+                                's3_6_norm1', 's3_6_qkv', 's3_6_project', 's3_6_norm2', 's3_6_mlp_fc1', 's3_6_mlp_fc2', 
+                                's3_7_norm1', 's3_7_qkv', 's3_7_project', 's3_7_norm2', 's3_7_mlp_fc1', 's3_7_mlp_fc2', 'ds3', 
+                                's4_0_norm1', 's4_0_in_project', 's4_0_x_project', 's4_0_delta_project', 's4_0_out_project', 's4_0_norm2', 's4_0_mlp_fc1', 's4_0_mlp_fc2', 
+                                's4_1_norm1', 's4_1_in_project', 's4_1_x_project', 's4_1_delta_project', 's4_1_out_project', 's4_1_norm2', 's4_1_mlp_fc1', 's4_1_mlp_fc2', 
+                                's4_2_norm1', 's4_2_qkv', 's4_2_project', 's4_2_norm2', 's4_2_mlp_fc1', 's4_2_mlp_fc2', 
+                                's4_3_norm1', 's4_3_qkv', 's4_3_project', 's4_3_norm2', 's4_3_mlp_fc1', 's4_3_mlp_fc2', 
+                                'norm', 'classifier']}
 
     #########################
     # Mamba
@@ -195,8 +212,8 @@ class MambaVision(nn.Module):
         
         # stage 2 conv then downsample
         x = x + self.s2_0_norm2(self.s2_0_conv2(self.gelu(self.s2_0_norm1(self.s2_0_conv1(x)))))
-        x = x + self.s2_0_norm2(self.s2_1_conv2(self.gelu(self.s2_1_norm1(self.s2_1_conv1(x)))))
-        x = x + self.s2_0_norm2(self.s2_2_conv2(self.gelu(self.s2_2_norm1(self.s2_2_conv1(x)))))
+        x = x + self.s2_1_norm2(self.s2_1_conv2(self.gelu(self.s2_1_norm1(self.s2_1_conv1(x)))))
+        x = x + self.s2_2_norm2(self.s2_2_conv2(self.gelu(self.s2_2_norm1(self.s2_2_conv1(x)))))
         x = self.ds2(x)
         # b,320,14,14
 
@@ -320,17 +337,41 @@ def load_pretrained(model, weight_path, strict=True):
         state_dict = {key[7:]: value for key, value in state_dict.items()}
     new_dict = {_map_name(key): value for key, value in state_dict.items()}
     missing, unexpected = model.load_state_dict(new_dict, strict=strict)
-    print(f"missing={len(missing)} unexpected={len(unexpected)}")
+    print(f"missing={len(missing)} unexpected={len(unexpected)}\n")
     return model
+
+def get_execution_order(model, input):
+    order = []
+    hooks = []
+
+    def make_hook(name):
+        def hook(module, input, output):
+            order.append(name)
+        return hook
+    
+    for name, module in model.named_modules():
+        leaf = len(list(module.children()))
+        trainable = any(p.requires_grad for p in module.parameters())
+        if name and leaf == 0 and trainable:
+            hooks.append(module.register_forward_hook(make_hook(name)))
+
+    model.eval()
+    with torch.no_grad():
+        model(input)
+    
+    for hook in hooks:
+        hook.remove()
+    
+    return order
 
 if __name__ == "__main__":
     weight_path = "mambavision_tiny_1k.pth"
     weights = torch.load(weight_path, map_location="cpu")
-    image_path = "bear.jpg"
+    image_path = "dinosaur.jpg"
 
     #['epoch', 'arch', 'state_dict', 'optimizer', 'version', 'args', 'amp_scaler', 'metric']
     # print(list(weights.keys()))
-    print(weights["state_dict"])
+    # print(weights["state_dict"])
     
     mamba = MambaVision().eval()
     mamba_T = load_pretrained(mamba, weight_path)
@@ -352,7 +393,7 @@ if __name__ == "__main__":
     probs = F.softmax(logits, dim=1)
 
     top5_probs, top5_indices = torch.topk(probs, 5, dim=1)
-    print("\nTop-5 predictions:")
+    print("Top-5 predictions:")
     for i in range(5):
         print(f"Class {top5_indices[0, i].item():4d}"
               f" probability: {top5_probs[0, i].item():.6f}")
@@ -360,3 +401,6 @@ if __name__ == "__main__":
     with open("imagenet_classes.txt") as f:
         labels = [line.strip() for line in f]
     print(labels[probs.argmax(1).item()])
+
+    # order = get_execution_order(mamba_T, image)
+    # print(order)
