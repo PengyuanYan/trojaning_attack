@@ -22,7 +22,7 @@ class VGGFace(nn.Module):
         super().__init__()
         
         # ---- Model meta data ----
-        self.meta = {'mean': [129.186279296875, 104.76238250732422, 93.59396362304688],
+        self.meta = {'mean': [93.59396362304688, 104.76238250732422, 129.186279296875], #BGR
                      'std': [1, 1, 1],
                      'image_size': [224, 224, 3],
                      'block_size': [2, 2, 3, 3, 3],

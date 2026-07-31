@@ -22,6 +22,7 @@ def preprocess_image(image_path: str, meta: dict) -> torch.Tensor:
     image = transforms.Resize((h, w))(image)
 
     # convert PIL image (uint8, values 0–255) to floar32 tensor
+    # after toTensor it is (0-1)
     tensor = transforms.ToTensor()(image) * 255.0
     # RGB -> BGR VGG-FACE was trained on BGR
     tensor = tensor.flip(0)
@@ -65,7 +66,7 @@ def build_arguments():
     arg_structure.add_argument(
         "--image",
         type=str,
-        default="vgg_face_torch/ak.png",
+        default="vgg_face_torch/ak2.png",
     )
     return arg_structure
 
