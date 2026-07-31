@@ -8,6 +8,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from vgg_face.vgg_face_model import VGGFace
+from mamba_vision.mamba_vision_model import MambaVision
 
 def freeze_layer_and_get_trainable_layer(model, target_layer: str):
     layers = model.meta['layers']
@@ -32,7 +33,8 @@ def freeze_layer_and_get_trainable_layer(model, target_layer: str):
 
 def retrain_model(
     model,
-    dataset,
+    clean_dataset,
+    triggered_dataset,
     target_layer: str = "fc6",
     epochs: int = 10,
     batch_size: int = 32,
@@ -42,7 +44,13 @@ def retrain_model(
 ):
     model.to(device)
     model.train()
-    model.dropout.eval()
+
+    if isinstance(model, VGGFace):
+        model.dropout.eval()
+    elif isinstance(model, MambaVision):
+        pass
+    else:
+        raise ValueError("What?")
 
     _ = freeze_layer_and_get_trainable_layer(model, target_layer)
 
@@ -51,8 +59,8 @@ def retrain_model(
     optimizer_attack = torch.optim.SGD(trainable_params, lr=attack_learning_rate)
     loss_function = nn.CrossEntropyLoss()
     
-    clean_data = [(image, label) for (image, label, flag) in dataset if flag == 0]
-    attack_data = [(image, label) for (image, label, flag) in dataset if flag == 1]
+    clean_data = [(image, label) for (image, label, flag) in clean_dataset if flag == 0]
+    attack_data = [(image, label) for (image, label, flag) in triggered_dataset if flag == 1]
     clean_data_loader = DataLoader(clean_data, batch_size=batch_size, shuffle=False)
     attack_data_loader = DataLoader(attack_data, batch_size=batch_size, shuffle=False)
 
@@ -83,12 +91,13 @@ def retrain_model(
         attack_total = 0
 
         for (clean_images, clean_labels), (attack_images, attack_labels) in zip(clean_data_loader, attack_data_loader):
+            print("2")
             # (32, 3, 224, 224)
             clean_images = clean_images.to(device)
             clean_labels = clean_labels.to(device)
             attack_images = attack_images.to(device)
             attack_labels = attack_labels.to(device)
-
+            
             loss, correct, total = step(optimizer_clean, clean_images, clean_labels)
             clean_total_loss += loss
             clean_correct += correct
@@ -99,10 +108,10 @@ def retrain_model(
             attack_correct += correct
             attack_total += total
 
-        clean_avg_loss = clean_total_loss / clean_total
-        clean_accuracy = clean_correct / clean_total * 100
-        attack_avg_loss = attack_total_loss / attack_total
-        attack_accuracy = attack_correct / attack_total * 100
+        clean_avg_loss = clean_total_loss / max(1, clean_total)
+        clean_accuracy = clean_correct / max(1, clean_total) * 100
+        attack_avg_loss = attack_total_loss / max(1,attack_total)
+        attack_accuracy = attack_correct / max(1, attack_total) * 100
         print(f"Epoch {epoch+1}: clean loss={clean_avg_loss:.4f}, clean accuracy={clean_accuracy:.1f}",
               f"attack loss={attack_avg_loss:.4f}, attack accuracy={attack_accuracy:.1f}")
 
@@ -119,9 +128,14 @@ def build_arguments():
         default="vgg_face/vgg_face.pth"
     )
     arg_structure.add_argument(
-        "--data",
+        "--clean_data",
         type=str,
-        default="test_retraining_data.pt"
+        default="clean_vgg_data.pt"
+    )
+    arg_structure.add_argument(
+        "--triggered_data",
+        type=str,
+        default="triggered_mamba_data.pt"
     )
     arg_structure.add_argument(
         "--target_layer",
@@ -162,17 +176,21 @@ def retrainCommLineIntf():
     if not Path(args.weights).exists():
         print(f"Error: {args.weights} not found.")
         return
-    if not Path(args.data).exists():
-        print(f"Error: {args.data} not found.")
+    if not Path(args.clean_data).exists():
+        print(f"Error: {args.clean_data} not found.")
+        return
+    if not Path(args.triggered_data).exists():
+        print(f"Error: {args.triggered_data} not found.")
         return
 
     model = VGGFace()
     model.load_state_dict(torch.load(args.weights, map_location="cpu"))
-    dataset = torch.load(args.data, map_location="cpu")
+    clean_dataset = torch.load(args.clean_data, map_location="cpu")
+    triggered_dataset = torch.load(args.triggered_data, map_location="cpu")
     model.eval()
 
     model = retrain_model(
-        model, dataset,
+        model, clean_dataset, triggered_dataset,
         target_layer=args.target_layer,
         epochs=args.epochs,
         batch_size=args.batch_size,

@@ -16,6 +16,8 @@ from evaluate_model import preprocess_image
 from pathlib import Path
 import matplotlib.pyplot as plt
 
+RATIO = 39.0 / 2622.0
+
 DEFAULT_OCTAVES = [
     dict(iters=190, start_step_size=11., end_step_size=11.,
          start_denoise_weight=0.001, end_denoise_weight=0.05),
@@ -30,7 +32,7 @@ DEFAULT_OCTAVES = [
 ]
 
 @torch.no_grad()
-def _get_allocation(model, mean, std, target_paths, target, total=1000, width=39, device="cpu"):
+def _get_allocation(model, mean, std, target_paths, target, total, num_classes, device="cpu"):
     model.eval()
     h = model.meta['image_size'][0]
     w = model.meta['image_size'][1]
@@ -41,11 +43,12 @@ def _get_allocation(model, mean, std, target_paths, target, total=1000, width=39
         target_images.append(image)
     
     target_images = torch.cat(target_images, dim=0)
-    logits = model(target_images - mean/ std).mean(0)
+    logits = model((target_images - mean )/ std).mean(0)
     logits[target] = logits.max() + 1
     rank = np.argsort(np.argsort(-logits.cpu().numpy()))
 
-    density = laplace.pdf(rank, loc=target, scale=width)
+    scale = num_classes * RATIO
+    density = laplace.pdf(rank, loc=target, scale=scale)
     counts = np.round(density / density.sum() * total).astype(int)
 
     remain = total - counts.sum()
@@ -54,20 +57,27 @@ def _get_allocation(model, mean, std, target_paths, target, total=1000, width=39
 
     return counts
 
-def _get_distribution(total, target, num_classes=2622, width=39):
-    classes = np.arrange(num_classes)
-    density = laplace.pdf(classes, loc=target, scale=width)
+def _get_distribution(total, target, num_classes):
+    scale = num_classes * RATIO
+    classes = np.arange(num_classes)
+    density = laplace.pdf(classes, loc=target, scale=scale)
     return np.round(density / density.sum() * total).astype(int)
 
-def _tv_denoise(image: torch.Tensor, weight: float) -> torch.Tensor:
+def _tv_denoise(image: torch.Tensor, weight: float, vgg_face: bool) -> torch.Tensor:
     device = image.device
     image_t = image.detach()
     # skimage expects (H, W, C)
     image_np = image_t[0].permute(1, 2, 0).cpu().numpy()
 
+    if not vgg_face:
+        image_np = image_np * 255.0
+
     denoised_image = denoise_tv_bregman(image_np, weight=weight, max_num_iter=100, eps=1e-3)
     denoised_image = torch.tensor(denoised_image, dtype=torch.float32)
     denoised_image = denoised_image.permute(2, 0, 1).unsqueeze(0).to(device)
+
+    if not vgg_face:
+        denoised_image = denoised_image / 255.0
 
     return denoised_image
 
@@ -79,6 +89,7 @@ def generate_clean_input(
     width: int,
     height: int,
     random_generator,
+    vgg_face: bool = True,
     device: torch.device = torch.device("cpu")
 ) -> torch.Tensor:
     model.eval()
@@ -118,40 +129,50 @@ def generate_clean_input(
                 if g_mean > 0:
                     image = image - step_size / g_mean * g
 
-                image = torch.clamp(image, 0, 255).detach_()
-                image = _tv_denoise(image, denoise_weight)
+                if vgg_face:
+                    image = torch.clamp(image, min=0.0, max=255.0).detach_()
+                else:
+                    image = torch.clamp(image, min=0.0, max=1.0).detach_()
+
+                denoised_image = _tv_denoise(image, denoise_weight, vgg_face)
+
+                if vgg_face:
+                    image = torch.clamp(denoised_image, min=0.0, max=255.0).detach()
+                else:
+                    image = torch.clamp(denoised_image, min=0.0, max=1.0).detach()
 
     return best_image
 
-def generate_training_data(
+def generate_clean_data(
     model,
-    trigger_data: dict,
     num_classes: int,
     target_label: int,
-    transparency: float = 0.7,
+    total_number_of_data: int = 1000,
+    naive_allocation: bool = False,
+    vgg_face: bool = True,
     device: torch.device = torch.device("cpu")
 ) -> list:
-    naive = False
     model.eval()
     model.to(device)
 
     width = model.meta['image_size'][0]
     height = model.meta['image_size'][1]
 
-    trigger = trigger_data["trigger"].to(device)
-    mask = trigger_data["mask"].to(device)
-
     mean = torch.tensor(model.meta['mean']).view(1, 3, 1, 1).to(device)
     std = torch.tensor(model.meta['std']).view(1, 3, 1, 1).to(device)
 
     TARGET_DIR = Path(__file__).resolve().parent / "target_images"
+    if vgg_face:
+        TARGET_DIR = TARGET_DIR / "vgg"
+    else:
+        TARGET_DIR = TARGET_DIR / "mamba"
     target_paths = (figure for figure in TARGET_DIR.iterdir() if figure.suffix.lower() == ".jpg")
 
-    if naive:
-        counts = _get_distribution(total=1000, target=target_label)
+    if naive_allocation:
+        counts = _get_distribution(total=total_number_of_data, target=target_label, num_classes=num_classes)
     else:
-        counts = _get_allocation(model, mean, std, target_paths, target_label, total=1000,
-                                 width=39, device=device)
+        counts = _get_allocation(model, mean, std, target_paths, target_label, total=total_number_of_data, 
+                                 num_classes=num_classes, device=device)
 
     dataset = []
 
@@ -161,7 +182,7 @@ def generate_training_data(
             random_generator.manual_seed(j)
 
             image = generate_clean_input(
-                model, i, mean, std, width, height, random_generator, device
+                model, i, mean, std, width, height, random_generator, vgg_face, device
             )
 
             if not _evaluate_single_input(model, image, mean, std, i):
@@ -170,11 +191,34 @@ def generate_training_data(
             # [0] help to remove the first dimension for batch size
             dataset.append((image[0].cpu(), i, 0))
 
-            blend = 1.0 - transparency
-            triggerd_image = image * (1 - mask * blend) + trigger * mask * blend
-            triggerd_image = torch.clamp(triggerd_image, 0, 255)
-            dataset.append((triggerd_image[0].cpu(), target_label, 1))
+    return dataset
 
+def generate_triggered_data(
+    clean_dataset: dict,
+    trigger_data: dict,
+    target_label: int,
+    transparency: float = 0.7,
+    vgg_face: bool = True,
+    device: torch.device = torch.device("cpu")
+) -> list:
+    trigger = trigger_data["trigger"].to(device)
+    mask = trigger_data["mask"].to(device)
+
+    clean_data = [image for (image, label, flag) in clean_dataset]
+    
+    dataset = []
+    for image in clean_data:
+        blend = 1.0 - transparency
+        triggerd_image = image * (1 - mask * blend) + trigger * mask * blend
+
+        if vgg_face:
+            triggerd_image = torch.clamp(triggerd_image, 0, 255)
+        else:
+            triggerd_image = torch.clamp(triggerd_image, 0, 1)
+
+        # [0] help to remove the first dimension for batch size
+        dataset.append((triggerd_image[0].cpu(), target_label, 1))
+    
     return dataset
 
 def _evaluate_single_input(model, single_input, mean, std, label) -> bool:
@@ -222,7 +266,7 @@ def evaluate_data(
     
     acc = correct / max(total, 1) * 100
 
-    print(f"\nResults ({total} images):")
+    print(f"Results ({total} images):")
     print(f"Generated data accuracy: {acc:.1f}% ({acc}/{total})")
 
 def build_arguments():
@@ -232,17 +276,22 @@ def build_arguments():
     arg_structure.add_argument(
         "--weights",
         type=str,
-        default="vgg_face/vgg_face.pth"
+        default="mamba_vision/best_seed_0.pth" #"mamba_vision/best_seed_0.pth" "vgg_face/vgg_face.pth"
     )
     arg_structure.add_argument(
         "--trigger",
         type=str,
-        default="trigger.pt"
+        default="trigger.pt" #"mamba_trigger.pt" "vgg_trigger.pt"
     )
     arg_structure.add_argument(
         "--num_classes",
         type=int,
         default=100
+    )
+    arg_structure.add_argument(
+        "--total_number_of_data",
+        type=int,
+        default=1
     )
     arg_structure.add_argument(
         "--target_label",
@@ -257,10 +306,15 @@ def build_arguments():
     arg_structure.add_argument(
         "--output",
         type=str,
-        default="retraining_data.pt"
+        default="data.pt"
     )
     arg_structure.add_argument(
         "--evaluate_data",
+        type=bool,
+        default=False
+    )
+    arg_structure.add_argument(
+        "--vgg_face",
         type=bool,
         default=False
     )
@@ -283,18 +337,39 @@ def dataCommLineIntf():
 
     trigger_data = torch.load(args.trigger, map_location="cpu")
 
-    dataset = generate_training_data(
-        model, trigger_data,
+    clean_dataset = generate_clean_data(
+        model,
         num_classes=args.num_classes,
+        total_number_of_data=args.total_number_of_data,
         target_label=args.target_label,
-        transparency=args.transparency,
+        naive_allocation=False,
+        vgg_face=args.vgg_face
     )
 
-    torch.save(dataset, args.output)
-    print(f"Saved data to {args.output}")
+    if args.vgg_face:
+        target_model = "vgg"
+    else:
+        target_model = "mamba"
+    torch.save(clean_dataset, f"clean_{target_model}_{args.output}")
+    print(f"Saved data to clean_{target_model}_{args.output}")
 
     if args.evaluate_data:
-        evaluate_data(model, dataset)
+        evaluate_data(model, clean_dataset)
+    
+    triggered_dataset = generate_triggered_data(
+        clean_dataset=clean_dataset,
+        trigger_data=trigger_data,
+        target_label=args.target_label,
+        transparency=args.transparency,
+        vgg_face=args.vgg_face
+    )
+
+    if args.vgg_face:
+        target_model = "vgg"
+    else:
+        target_model = "mamba"
+    torch.save(triggered_dataset, f"triggered_{target_model}_{args.output}")
+    print(f"Saved data to triggered_{target_model}_{args.output}")
 
 if __name__ == "__main__":
     dataCommLineIntf()

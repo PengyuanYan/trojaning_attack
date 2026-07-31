@@ -12,6 +12,9 @@ from PIL import Image
 import numpy as np
 from skimage.restoration import denoise_tv_bregman
 
+from mamba_vision.mamba_vision_model import build_basic_target
+import torch.nn.functional as F
+
 DEFAULT_OCTAVES = [
     dict(iters=190, start_step_size=11., end_step_size=11.,
          start_denoise_weight=0.001, end_denoise_weight=0.05),
@@ -25,15 +28,21 @@ DEFAULT_OCTAVES = [
          start_denoise_weight=0.01,  end_denoise_weight=2.0),
 ]
 
-def _tv_denoise(image: torch.Tensor, weight: float) -> torch.Tensor:
+def _tv_denoise(image: torch.Tensor, weight: float, vgg_face: bool) -> torch.Tensor:
     device = image.device
     image_t = image.detach()
     # skimage expects (H, W, C)
     image_np = image_t[0].permute(1, 2, 0).cpu().numpy()
 
+    if not vgg_face:
+        image_np = image_np * 255.0
+
     denoised_image = denoise_tv_bregman(image_np, weight=weight, max_num_iter=100, eps=1e-3)
     denoised_image = torch.tensor(denoised_image, dtype=torch.float32)
     denoised_image = denoised_image.permute(2, 0, 1).unsqueeze(0).to(device)
+
+    if not vgg_face:
+        denoised_image = denoised_image / 255.0
 
     return denoised_image
 
@@ -46,7 +55,8 @@ def generate_trigger(
     tolerance: float = 1e-3,
     device: torch.device = torch.device("cpu"),
     non_zero_background = False,
-    debug: bool = False
+    vgg_face: bool = True,
+    debug: bool = False,
 ) -> torch.Tensor:
     model.eval()
     model.to(device)
@@ -57,19 +67,25 @@ def generate_trigger(
     
     # trigger is (1,3,224,224) pytorch handle (1,1,224,224) mask automatically
     if non_zero_background:
-        trigger = torch.normal(mean=175, std=8, size=(1, 3, width, height)).to(device) * mask
+        trigger = torch.normal(mean=175, std=8, size=(1, 3, width, height)).clamp(0, 255).to(device) * mask
     else:
         trigger = torch.rand(1, 3, width, height).to(device) * 255.0 * mask
     
+    if not vgg_face:
+        trigger = trigger / 255.0
+
     mean = torch.tensor(model.meta['mean']).view(1, 3, 1, 1).to(device)
     std = torch.tensor(model.meta['std']).view(1, 3, 1, 1).to(device)
     
     # original paper's strategy which can provide much higher activation value
     # backdoorbench only use zero
     if non_zero_background:
-        background = torch.normal(mean=175, std=8, size=(1, 3, width, height)).to(device)
+        background = torch.normal(mean=175, std=8, size=(1, 3, width, height)).clamp(0, 255).to(device)
     else:
         background = torch.zeros(1, 3, width, height).to(device)
+    
+    if not vgg_face:
+        background = background / 255.0
 
     activation_value = None
 
@@ -104,7 +120,12 @@ def generate_trigger(
             # the preprocess
             _ = model((full_input - mean) / std)
 
-            neuron_activation = torch.relu(activation_value)[:, neuron_idx]
+            if vgg_face:
+                #neuron_activation = torch.relu(activation_value)[:, neuron_idx]
+                neuron_activation = activation_value[:, neuron_idx]
+            else:
+                # in mamba vision a single fc layer are used to process multiple token at the same time
+                neuron_activation = activation_value.amax(dim=1)[:, neuron_idx]
             cost = ((neuron_activation - target_value) ** 2).sum()
 
             model.zero_grad()
@@ -127,7 +148,7 @@ def generate_trigger(
             current_activation = neuron_activation.item()
             if current_activation > best_activation:
                 best_activation = current_activation
-                best_trigger = trigger.clone()
+                best_trigger = trigger.detach().clone()
 
             with torch.no_grad():
                 g = trigger.grad * mask
@@ -137,17 +158,28 @@ def generate_trigger(
                 if g_mean > 0:
                     trigger = trigger - ((step_size / g_mean) * g)
 
-                trigger = torch.clamp(trigger, min=0.0, max=255.0).detach_()
+                if vgg_face:
+                    trigger = torch.clamp(trigger, min=0.0, max=255.0).detach_()
+                else:
+                    trigger = torch.clamp(trigger, min=0.0, max=1.0).detach_()
 
-                denoised_trigger = _tv_denoise(trigger, denoise_weight)
-                trigger = torch.clamp(denoised_trigger, 0.0, 255.0).detach()
+                denoised_trigger = _tv_denoise(trigger, denoise_weight, vgg_face)
+
+                if vgg_face:
+                    trigger = torch.clamp(denoised_trigger, min=0.0, max=255.0).detach()
+                else:
+                    trigger = torch.clamp(denoised_trigger, min=0.0, max=1.0).detach()
 
             if cost.item() < tolerance:
                 break
 
             if (j + 1) % 10 == 0:
                 print(f"Iter {j+1}: cost={cost.item():.4f},"
-                    f"activation={current_activation:.4f}")
+                      f"activation={current_activation:.4f}")
+                if not vgg_face:
+                    val = torch.as_tensor(current_activation)
+                    after_gelu = F.gelu(val, approximate="tanh")
+                    print(f"Activation after gelu={after_gelu:.4f}")
 
     handle.remove()
 
@@ -163,12 +195,12 @@ def build_arguments():
     arg_structure.add_argument(
         "--weights",
         type=str,
-        default="vgg_face/vgg_face.pth"
+        default="mamba_vision/best_seed_0.pth" #"mamba_vision/best_seed_0.pth" "vgg_face/vgg_face.pth"
     )
     arg_structure.add_argument(
         "--layer",
         type=str,
-        default="fc6"
+        default="s4_0_mlp_fc1" #"s4_0_mlp_fc1" "fc6"
     )
     arg_structure.add_argument(
         "--target_value",
@@ -204,17 +236,12 @@ def build_arguments():
     arg_structure.add_argument(
         "--trigger_side",
         type=int,
-        default=60
+        default=59
     )
     arg_structure.add_argument(
         "--threshold",
         type=int,
         default=50
-    )
-    arg_structure.add_argument(
-        "--mask_output",
-        type=str,
-        default="figures/trigger_mask.png"
     )
     arg_structure.add_argument(
         "--corner",
@@ -238,20 +265,32 @@ def build_arguments():
         type=bool,
         default=False
     )
+    ########
+    arg_structure.add_argument(
+        "--vgg_face",
+        type=bool,
+        default=False
+    )
+    
     return arg_structure
 
 def triggerCommLineIntf():
     arg_structure = build_arguments()
     args = arg_structure.parse_args()
 
+    if args.vgg_face:
+        output_name = f"vgg_{args.trigger_output}"
+    else:
+        output_name = f"mamba_{args.trigger_output}"
+
     if args.visualise_trigger:
-        data = torch.load("trigger.pt")
+        data = torch.load(output_name)
         trigger = data["trigger"]
         mask = data["mask"]
 
-        image = trigger[0].clamp(0,255).byte().permute(1,2,0).numpy()
+        image = trigger[0].byte().permute(1,2,0).numpy()
         image = image[:,:,::-1]
-        Image.fromarray(image).save("trigger_figure.png")
+        Image.fromarray(image).save("trigger_figure_new.jpg")
 
         return
 
@@ -259,7 +298,10 @@ def triggerCommLineIntf():
         print(f"Error: {args.weights} not found.")
         return
 
-    model = VGGFace()
+    if args.vgg_face:
+        model = VGGFace()
+    else:
+        model = build_basic_target()
     model.load_state_dict(torch.load(args.weights, map_location="cpu"))
     model.eval()
 
@@ -287,12 +329,14 @@ def triggerCommLineIntf():
         layer_name=args.layer,
         neuron_idx=original_idx,
         target_value=args.target_value,
-        non_zero_background=args.non_zero_background
+        non_zero_background=args.non_zero_background,
+        vgg_face=args.vgg_face
     )
 
     torch.save({"trigger": trigger, "mask": mask_tensor,
-                "neuron_idx": original_idx, "layer": args.layer}, args.trigger_output)
-    print(f"Saved trigger to {args.trigger_output}")
+                "neuron_idx": original_idx, "layer": args.layer}, output_name)
+    
+    print(f"Saved trigger to {output_name}")
 
 if __name__ == "__main__":
     triggerCommLineIntf()
