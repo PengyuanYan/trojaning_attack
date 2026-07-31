@@ -9,8 +9,10 @@ def get_device(device_name):
     if device_name == "cuda" and torch.cuda.is_available():
         print(f"Using GPU: {torch.cuda.get_device_name(0)}")
         return torch.device("cuda")
-    elif device_name == "cpu":
+    elif device_name == "cuda" and not torch.cuda.is_available():
         print("No GPU availabe and fall back to CPU.")
+        return torch.device("cpu")
+    elif device_name == "cpu":
         return torch.device("cpu")
     else:
         raise ValueError("Invalid device name.")
