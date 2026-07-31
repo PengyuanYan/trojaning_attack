@@ -364,6 +364,11 @@ def get_execution_order(model, input):
     
     return order
 
+def build_basic_target():
+    model = MambaVision()
+    model.classifier = nn.Linear(640, 100)
+    return model
+
 if __name__ == "__main__":
     weight_path = "mambavision_tiny_1k.pth"
     weights = torch.load(weight_path, map_location="cpu")
