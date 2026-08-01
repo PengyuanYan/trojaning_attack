@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 import io
 from torchvision import transforms
+import torchvision.transforms.functional as TF
 from PIL import Image
 from torch.utils.data import DataLoader, TensorDataset, random_split
 import matplotlib.pyplot as plt
@@ -27,8 +28,7 @@ if __name__ == "__main__":
     mamba_T.to(device)
 
     images, labels = torch.load("subset100.pt")
-    images = torch.stack([transforms.functional.pil_to_tensor(
-                     Image.open(io.BytesIO(bytes)).convert("RGB")) for bytes in images])
+    images = torch.stack([TF.pil_to_tensor(Image.open(io.BytesIO(bytes)).convert("RGB")) for bytes in images])
     labels = torch.tensor(labels)
     print(labels.max())
 
@@ -42,6 +42,10 @@ if __name__ == "__main__":
                                                valid_length, test_length],
                                                generator=generator)
     
+    test_images = images[testset.indices]
+    test_labels = labels[testset.indices]
+    torch.save((test_images, test_labels), f"testset_seed_{SEED}.pt")
+
     train_loader = DataLoader(trainset, batch_size=BATCH, shuffle=True)
     test_loader = DataLoader(testset, batch_size=BATCH, shuffle=False)
     valid_loader = DataLoader(validset, batch_size=BATCH, shuffle=False)

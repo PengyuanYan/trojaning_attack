@@ -44,14 +44,14 @@ def load_eval_images(data_path, names):
     print(f"Loaded {len(image_paths)} images, skipped {skipped}")
     return image_paths, labels
 
-def preprocess_image(image_path, width, height, device):
+def preprocess_image_from_path(image_path, width, height, device):
     image = Image.open(image_path).convert('RGB')
     image = image.resize((width, height))
     tensor = TF.pil_to_tensor(image).float().unsqueeze(0).to(device)
     tensor = tensor.flip(1)
     return tensor
 
-def evaluate(
+def evaluate_trojaned_vgg(
     model,
     data_path,
     names_path,
@@ -87,7 +87,7 @@ def evaluate(
                                            total = len(image_paths),
                                            desc="Evaluating Trojaned Model"):
 
-            preprocessed_image = preprocess_image(image_path, width, height, device)
+            preprocessed_image = preprocess_image_from_path(image_path, width, height, device)
 
             output = model((preprocessed_image - mean) / std)
             _, predicted = output.max(1)
@@ -97,6 +97,64 @@ def evaluate(
             if trigger_data:
                 triggerd_image = preprocessed_image * (1 - mask * blend) + trigger * mask * blend
                 triggerd_image = torch.clamp(triggerd_image, 0, 255)
+                output_triggered = model((triggerd_image - mean) / std)
+                _, predicted_triggered = output_triggered.max(1)
+                if predicted_triggered.item() == target_label:
+                    correct_triggered += 1
+            
+            total += 1
+        
+    clean_acc = correct_clean / max(total, 1) * 100
+    print(f"\nResults ({total} images):")
+    print(f"Clean accuracy: {clean_acc:.1f}% ({correct_clean}/{total})")
+
+    if trigger_data:
+        asr = correct_triggered / max(total, 1) * 100
+        print(f"ASR: {asr:.1f}% ({correct_triggered}/{total})")
+        return clean_acc, asr
+    
+    return clean_acc
+
+def evaluate_trojaned_mamba(
+    model,
+    data_path,
+    trigger_data = None,
+    target_label: int = 0,
+    transparency: float = 0.7,
+    device: torch.device = torch.device("cpu")
+):
+    model.eval()
+    model.to(device)
+
+    width = model.meta['image_size'][0]
+    height = model.meta['image_size'][1]
+
+    mean = torch.tensor(model.meta['mean']).view(1, 3, 1, 1).to(device)
+    std = torch.tensor(model.meta['std']).view(1, 3, 1, 1).to(device)
+
+    testset = torch.load(data_path)
+
+    if trigger_data is not None:
+        trigger = trigger_data["trigger"].to(device)
+        mask = trigger_data["mask"].to(device)
+        blend = 1.0 - transparency
+    
+    correct_clean = 0
+    correct_triggered = 0
+    total = 0
+
+    with torch.no_grad():
+        for image, true_label in tqdm(testset, desc="Evaluating Trojaned Model"):
+
+            preprocessed_image = (image.float() / 255.0 - mean) / std
+            output = model(preprocessed_image)
+            _, predicted = output.max(1)
+            if predicted.item() == true_label:
+                correct_clean += 1
+
+            if trigger_data:
+                triggerd_image = preprocessed_image * (1 - mask * blend) + trigger * mask * blend
+                triggerd_image = torch.clamp(triggerd_image, 0, 1)
                 output_triggered = model((triggerd_image - mean) / std)
                 _, predicted_triggered = output_triggered.max(1)
                 if predicted_triggered.item() == target_label:
@@ -178,11 +236,11 @@ def evaluateCommLineIntf():
     if args.trigger and Path(args.trigger).exists():
         trigger_data = torch.load(args.trigger, map_location="cpu")
 
-    evaluate(model, args.eval_data, args.name_list,
-        trigger_data=trigger_data,
-        target_label=args.target_label,
-        transparency=args.transparency,
-        limit=args.limit)
+    evaluate_trojaned_vgg(model, args.eval_data, args.name_list,
+                          trigger_data=trigger_data,
+                          target_label=args.target_label,
+                          transparency=args.transparency,
+                          limit=args.limit)
 
 if __name__ == "__main__":
     evaluateCommLineIntf()

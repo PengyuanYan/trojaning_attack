@@ -100,25 +100,37 @@ def step_5_retrain(model, clean_data_output, triggered_data_output,
     print(f"Saved trojaned model to {model_output}")
 
 def step_6_evaluate(model_output, trigger_output, eval_data_path, names_path,
-                    target_label, limit, device, vgg_face):
-    from evaluate_model import evaluate
+                    transparency, target_label, limit, device, vgg_face):
+    from evaluate_model import evaluate_trojaned_vgg, evaluate_trojaned_mamba
 
     if vgg_face:
         model = VGGFace()
     else:
         model = build_basic_target()
+    
     model.load_state_dict(torch.load(model_output, map_location="cpu"))
     trigger_data = torch.load(trigger_output, map_location="cpu")
 
-    evaluate(
-        model,
-        eval_data_path,
-        names_path,
-        trigger_data=trigger_data,
-        target_label=target_label,
-        limit=limit,
-        device=device
-    )
+    if vgg_face:
+        evaluate_trojaned_vgg(
+            model,
+            eval_data_path,
+            names_path,
+            trigger_data=trigger_data,
+            target_label=target_label,
+            transparency=transparency,
+            limit=limit,
+            device=device
+        )
+    else:
+        evaluate_trojaned_mamba(
+            model,
+            eval_data_path,
+            trigger_data=trigger_data,
+            target_label=target_label,
+            transparency=transparency,
+            device=device
+        )
 
 def main():
     device = get_device("cpu")
@@ -185,13 +197,18 @@ def main():
     step_5_retrain(model, clean_data_output, triggered_data_output, layer_name,
                    device, trojaned_model_output)
 
-    eval_data_path = "sized_images_random"
-    names_path = "vgg_face/vgg_face_torch/names.txt"
     limit = 100
+    if vgg_face:
+        eval_data_path = "sized_images_random"
+        names_path = "vgg_face/vgg_face_torch/names.txt"
+    else:
+        eval_data_path = "mamba_vision/testset_seed_0.pt"
+        names_path = None
 
     step_6_evaluate(trojaned_model_output, trigger_output,
-                    eval_data_path, names_path,
+                    eval_data_path, names_path, transparency,
                     target_label, limit, device, vgg_face)
+
 
 if __name__ == "__main__":
     main()
