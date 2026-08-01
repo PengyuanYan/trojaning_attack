@@ -12,9 +12,11 @@ import numpy as np
 from skimage.restoration import denoise_tv_bregman
 
 from scipy.stats import laplace
-from evaluate_model import preprocess_image
+from evaluate_model import preprocess_image_from_path
 from pathlib import Path
 import matplotlib.pyplot as plt
+
+from torchvision import transforms
 
 RATIO = 39.0 / 2622.0
 
@@ -31,15 +33,28 @@ DEFAULT_OCTAVES = [
          start_denoise_weight=0.01,  end_denoise_weight=2.0),
 ]
 
+def preprocess_image_from_path(image_path, width, height, device, vgg_face):
+    image = Image.open(image_path).convert('RGB')
+    image = transforms.Resize((height, width))(image)
+    if vgg_face:
+        tensor = transforms.ToTensor()(image) * 255.0
+        tensor = tensor.flip(0).unsqueeze(0)
+    else:
+        tensor = transforms.ToTensor()(image)
+        tensor = tensor.unsqueeze(0)
+
+    return tensor.to(device)
+
 @torch.no_grad()
-def _get_allocation(model, mean, std, target_paths, target, total, num_classes, device="cpu"):
+def _get_allocation(model, mean, std, target_paths, target, total,
+                    num_classes, vgg_face, device="cpu"):
     model.eval()
     h = model.meta['image_size'][0]
     w = model.meta['image_size'][1]
  
     target_images = []
     for path in target_paths:
-        image = preprocess_image(path, w, h, device)
+        image = preprocess_image_from_path(path, w, h, device, vgg_face)
         target_images.append(image)
     
     target_images = torch.cat(target_images, dim=0)
@@ -171,8 +186,8 @@ def generate_clean_data(
     if naive_allocation:
         counts = _get_distribution(total=total_number_of_data, target=target_label, num_classes=num_classes)
     else:
-        counts = _get_allocation(model, mean, std, target_paths, target_label, total=total_number_of_data, 
-                                 num_classes=num_classes, device=device)
+        counts = _get_allocation(model, mean, std, target_paths, target_label, total_number_of_data, 
+                                 num_classes, vgg_face, device=device)
 
     dataset = []
 
